@@ -1,56 +1,40 @@
 """
-User Location Tracker - Streamlit App
+User Location Tracker - Streamlit App (minimal)
 -------------------------------------------
-STANDALONE app. Does NOT modify app.py (the Farm Map app) in any way —
-this is a separate script/page that adds a new capability:
+STANDALONE app. Does NOT modify app.py (the Farm Map app) in any way.
 
-  1. A user types their Name and captures their CURRENT browser location
-     (via the streamlit-js-eval package, which asks the browser for GPS/
-     network location permission) — or enters lat/lon manually as a
-     fallback if they decline the permission prompt or are on a device
-     without geolocation.
-  2. That (Name, Latitude, Longitude, Timestamp) row is saved to a new
-     "UserLocations" worksheet in the SAME private Google Sheet that the
-     manager app already uses for WaterQualityData (reusing the exact
-     same [gcp_service_account] / [gsheet] secrets — no new sheet has to
-     be created by hand; this app creates the "UserLocations" tab itself
-     the first time it runs, if it doesn't already exist).
-  3. The map at the bottom shows BOTH the existing farm locations (read
-     the same public CSV that app.py reads — read-only, untouched) AND
-     every saved user location (a distinct red pin), so you can see a
-     user's saved spot together with all the farms on one map.
+This app is intentionally just two things for the user:
+  1. A "Name" text field
+  2. A "Save Location" button
 
-Nothing about the original Locations sheet, the Sales sheet, or app.py's
-logic is touched or written to — this app only reads the farm CSV for
-display and writes to its own new "UserLocations" tab.
+Pressing the button captures the browser's current GPS/network location
+(via the streamlit-js-eval package, which triggers the browser's location
+permission prompt) and saves (Name, Latitude, Longitude, Timestamp) as a
+new row in a "UserLocations" worksheet inside the SAME private Google
+Sheet the manager app already uses for WaterQualityData -- reusing the
+same [gcp_service_account] / [gsheet] secrets. That worksheet is created
+automatically (with headers) the first time this app ever saves a row.
+
+Viewing everyone's saved locations together with the farms on a map is a
+separate step, not part of this minimal entry screen -- happy to build
+that as its own small "view" app/page if wanted.
 
 Local run:
-    pip install streamlit folium streamlit-folium streamlit-js-eval gspread google-auth pandas
+    pip install -r requirements.txt
     streamlit run user_location_app.py
 
-    Needs the same `.streamlit/secrets.toml` as the manager app / app.py's
-    Pond Layout feature:
+    Needs the same `.streamlit/secrets.toml` as the manager app:
         [gcp_service_account]
         ... (same service-account JSON fields) ...
 
         [gsheet]
         sheet_id = "..."   # same WaterQualityData spreadsheet key
-    The service account must have Editor access on that spreadsheet (it
-    already needs this for WaterQualityData writes in the manager app).
-
-Deploy:
-    Same as app.py — push to a GitHub repo and deploy on
-    https://share.streamlit.io, with the same secrets configured.
+    The service account must have Editor access on that spreadsheet.
 """
 
-import re
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
-import folium
-import streamlit.components.v1 as components
-
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -63,26 +47,16 @@ except ImportError:
 # ============================================================
 # CONFIG
 # ============================================================
-# Read-only: the same public farm-locations CSV that app.py uses, so this
-# app's map can show farms + the new user pin together. Nothing here
-# writes back to this sheet.
-LOCATIONS_SHEET_ID = "1v2qTD5iUtdjFTixt9VZ1vM0dZPnyEVz4AYHtILVJi0A"
-LOCATIONS_GID = "0"
-LOCATIONS_CSV_URL = (
-    f"https://docs.google.com/spreadsheets/d/{LOCATIONS_SHEET_ID}"
-    f"/export?format=csv&gid={LOCATIONS_GID}"
-)
-
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 USERLOC_WORKSHEET_NAME = "UserLocations"
-USERLOC_HEADERS = ["Name", "Latitude", "Longitude", "Timestamp"]
+USERLOC_HEADERS = ["Name", "Latitude", "Longitude", "Last Updated"]
 
-st.set_page_config(page_title="Add My Location", page_icon="📍", layout="wide")
-st.title("📍 Add Your Location")
+st.set_page_config(page_title="Save My Location", page_icon="📍", layout="centered")
+st.title("📍 Save My Location")
 
 
 # ============================================================
-# GOOGLE SHEET HELPERS (new "UserLocations" tab only)
+# GOOGLE SHEET HELPERS
 # ============================================================
 def _gsheet_configured():
     return "gcp_service_account" in st.secrets and "gsheet" in st.secrets and "sheet_id" in st.secrets["gsheet"]
@@ -109,193 +83,58 @@ def get_userloc_worksheet():
     return ws
 
 
-@st.cache_data(ttl=60, show_spinner="Loading saved locations...")
-def load_user_locations() -> pd.DataFrame:
-    ws = get_userloc_worksheet()
-    records = ws.get_all_records()
-    df = pd.DataFrame(records)
-    if df.empty:
-        return pd.DataFrame(columns=USERLOC_HEADERS)
-    df.columns = [c.strip() for c in df.columns]
-    df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
-    df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
-    return df.dropna(subset=["Latitude", "Longitude"])
-
-
 def save_user_location(name: str, lat: float, lon: float):
+    """Upsert by name: if this person already has a saved row, overwrite
+    it in place with their new lat/lon and today's Last Updated date
+    (so each user only ever has ONE row on the sheet). Otherwise append
+    a new row."""
     ws = get_userloc_worksheet()
-    ws.append_row([name.strip(), lat, lon, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
-    load_user_locations.clear()
+    name = name.strip()
+    last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    existing_names = ws.col_values(1)  # column A, including the header row
+
+    row_number = None
+    for i, existing_name in enumerate(existing_names):
+        if i == 0:
+            continue  # header row
+        if existing_name.strip() == name:
+            row_number = i + 1  # gspread rows are 1-based
+            break
+
+    if row_number:
+        ws.update(f"A{row_number}:D{row_number}", [[name, lat, lon, last_updated]])
+    else:
+        ws.append_row([name, lat, lon, last_updated])
 
 
 # ============================================================
-# FARM LOCATIONS (read-only — same parsing rules as app.py)
-# ============================================================
-@st.cache_data(ttl=300, show_spinner="Loading farm locations...")
-def load_farm_locations(url: str) -> pd.DataFrame:
-    df = pd.read_csv(url)
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-
-def parse_location(location: str):
-    """Same point/polygon parser as app.py — polygons are reduced to
-    their centroid here since this app only needs a point per farm."""
-    if not isinstance(location, str):
-        return None, None
-    location = location.strip()
-    if location.lower().startswith("polygon"):
-        coords_match = re.search(r"\(\(([^)]+)\)\)", location)
-        if not coords_match:
-            return None, None
-        points = []
-        for pair in coords_match.group(1).split(","):
-            parts = pair.strip().split()
-            if len(parts) != 2:
-                continue
-            try:
-                lon, lat = float(parts[0]), float(parts[1])
-                points.append((lat, lon))
-            except ValueError:
-                continue
-        if not points:
-            return None, None
-        return sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points)
-    match = re.match(r"\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*", location)
-    if not match:
-        return None, None
-    return float(match.group(1)), float(match.group(2))
-
-
-# ============================================================
-# FORM — capture Name + current location
+# MINIMAL UI -- Name + Save Location button, nothing else
 # ============================================================
 if not _gsheet_configured():
     st.error(
         "⚠️ Saving is unavailable — add the same `[gcp_service_account]` and "
         "`[gsheet]` (with `sheet_id`) sections used by the manager app to "
-        "this app's `.streamlit/secrets.toml` before locations can be saved."
+        "this app's `.streamlit/secrets.toml`."
     )
 
-st.subheader("1. Enter your name and capture your location")
-
-name = st.text_input("Your name")
-
-browser_lat, browser_lon = None, None
-if _GEO_AVAILABLE:
-    st.caption("Click below and allow the browser's location permission prompt.")
-    loc = get_geolocation()
-    if loc and "coords" in loc:
-        browser_lat = loc["coords"]["latitude"]
-        browser_lon = loc["coords"]["longitude"]
-        st.success(f"Current location captured: {browser_lat:.6f}, {browser_lon:.6f}")
-    else:
-        st.info("Waiting for location permission... (or use manual entry below)")
-else:
-    st.warning(
-        "The `streamlit-js-eval` package isn't installed, so automatic browser "
-        "location capture is unavailable — run `pip install streamlit-js-eval` "
-        "to enable it. Use manual entry below in the meantime."
+if not _GEO_AVAILABLE:
+    st.error(
+        "The `streamlit-js-eval` package isn't installed — run "
+        "`pip install streamlit-js-eval` (see requirements.txt) so the "
+        "browser's current location can be captured."
     )
 
-with st.expander("Enter coordinates manually instead", expanded=not _GEO_AVAILABLE):
-    manual_lat = st.number_input("Latitude", value=browser_lat or 0.0, format="%.6f")
-    manual_lon = st.number_input("Longitude", value=browser_lon or 0.0, format="%.6f")
+name = st.text_input("Name")
 
-final_lat = browser_lat if browser_lat is not None else manual_lat
-final_lon = browser_lon if browser_lon is not None else manual_lon
-
-if st.button("💾 Save My Location", type="primary", disabled=not _gsheet_configured()):
+if st.button("💾 Save Location", type="primary", disabled=not (_gsheet_configured() and _GEO_AVAILABLE)):
     if not name.strip():
         st.warning("Please enter your name first.")
-    elif not final_lat or not final_lon:
-        st.warning("No location set yet — allow browser location access or enter coordinates manually.")
     else:
-        save_user_location(name, final_lat, final_lon)
-        st.success(f"Saved location for {name.strip()}.")
-        st.rerun()
-
-# ============================================================
-# MAP — farms (read-only) + saved user locations
-# ============================================================
-st.subheader("2. Map — farms and saved user locations")
-
-try:
-    raw_farms = load_farm_locations(LOCATIONS_CSV_URL)
-    farm_df = raw_farms.copy()
-    parsed = farm_df["Location"].apply(parse_location)
-    farm_df["lat"] = parsed.apply(lambda x: x[0])
-    farm_df["lon"] = parsed.apply(lambda x: x[1])
-    farm_df = farm_df.dropna(subset=["lat", "lon"])
-except Exception as e:
-    farm_df = pd.DataFrame(columns=["Customer Name", "Farm Name", "lat", "lon"])
-    st.warning(f"Could not load farm locations for the map background: {e}")
-
-user_df = pd.DataFrame(columns=USERLOC_HEADERS)
-if _gsheet_configured():
-    try:
-        user_df = load_user_locations()
-    except Exception as e:
-        st.warning(f"Could not load saved user locations: {e}")
-
-if st.button("🔄 Refresh map"):
-    load_user_locations.clear()
-    load_farm_locations.clear()
-    st.rerun()
-
-st.caption(f"Showing {len(farm_df)} farm(s) and {len(user_df)} saved user location(s)")
-
-if not user_df.empty:
-    center_lat, center_lon = user_df["Latitude"].iloc[-1], user_df["Longitude"].iloc[-1]
-    zoom = 14
-elif not farm_df.empty:
-    center_lat, center_lon = farm_df["lat"].mean(), farm_df["lon"].mean()
-    zoom = 10
-else:
-    center_lat, center_lon = 7.8731, 80.7718  # fallback: center of Sri Lanka
-    zoom = 8
-
-m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, tiles=None)
-folium.TileLayer(
-    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    attr="Esri, Maxar, Earthstar Geographics",
-    name="Satellite",
-    overlay=False,
-    control=False,
-).add_to(m)
-
-# Farms — small blue markers, for context only.
-for _, row in farm_df.iterrows():
-    display_name = (
-        f"{row['Customer Name']} — {row['Farm Name']}"
-        if str(row.get("Farm Name", "")).strip() not in ("", "-", "nan")
-        else row.get("Customer Name", "")
-    )
-    folium.CircleMarker(
-        location=[row["lat"], row["lon"]],
-        radius=6,
-        color="#3388ff",
-        fill=True,
-        fill_color="#3388ff",
-        fill_opacity=0.8,
-        tooltip=str(display_name),
-        popup=folium.Popup(f"<b>Farm:</b> {display_name}", max_width=250),
-    ).add_to(m)
-
-# Saved user locations — distinct red pins on top.
-for _, row in user_df.iterrows():
-    folium.Marker(
-        location=[row["Latitude"], row["Longitude"]],
-        tooltip=str(row.get("Name", "")),
-        popup=folium.Popup(
-            f"<b>{row.get('Name', '')}</b><br>Saved: {row.get('Timestamp', '')}", max_width=250
-        ),
-        icon=folium.Icon(color="red", icon="user", prefix="fa"),
-    ).add_to(m)
-
-map_html = folium.Figure().add_child(m).render()
-components.html(map_html, height=650, width=None)
-
-if not user_df.empty:
-    st.subheader("Saved locations")
-    st.dataframe(user_df, hide_index=True, use_container_width=True)
+        loc = get_geolocation()
+        if not loc or "coords" not in loc:
+            st.warning("Couldn't get your current location yet — please allow the browser's location permission prompt and press Save again.")
+        else:
+            lat = loc["coords"]["latitude"]
+            lon = loc["coords"]["longitude"]
+            save_user_location(name, lat, lon)
+            st.success(f"Saved location for {name.strip()} ({lat:.6f}, {lon:.6f}).")
