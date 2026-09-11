@@ -33,6 +33,7 @@ Local run:
 """
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 import gspread
@@ -50,6 +51,11 @@ except ImportError:
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 USERLOC_WORKSHEET_NAME = "UserLocations"
 USERLOC_HEADERS = ["Name", "Latitude", "Longitude", "Last Updated"]
+# The app server (e.g. Streamlit Cloud) usually runs in UTC, which made
+# "Last Updated" show the wrong (UTC) time instead of Sri Lanka local
+# time. Pin the saved timestamp to Sri Lanka's timezone regardless of
+# where the app is hosted.
+SRI_LANKA_TZ = ZoneInfo("Asia/Colombo")
 
 st.set_page_config(page_title="Save My Location", page_icon="📍", layout="centered")
 st.title("📍 Save My Location")
@@ -90,7 +96,7 @@ def save_user_location(name: str, lat: float, lon: float):
     a new row."""
     ws = get_userloc_worksheet()
     name = name.strip()
-    last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    last_updated = datetime.now(SRI_LANKA_TZ).strftime("%Y-%m-%d %H:%M:%S")
     existing_names = ws.col_values(1)  # column A, including the header row
 
     row_number = None
