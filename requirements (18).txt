@@ -1,0 +1,6 @@
+streamlit
+pandas
+folium
+streamlit-js-eval
+gspread
+google-auth
