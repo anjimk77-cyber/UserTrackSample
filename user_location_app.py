@@ -124,17 +124,38 @@ if not _GEO_AVAILABLE:
         "browser's current location can be captured."
     )
 
+# get_geolocation() is ASYNC: it renders a small component that asks the
+# browser for permission and only delivers the coordinates on a later
+# rerun. Calling it fresh at button-click time (the old bug) meant it was
+# always empty on that click. Instead, call it on every run so it keeps
+# requesting/refreshing, and stash whatever it returns in session_state
+# — the button then just uses whatever has already been captured.
+if _GEO_AVAILABLE:
+    loc = get_geolocation()
+    if loc and "coords" in loc:
+        st.session_state["_captured_coords"] = (
+            loc["coords"]["latitude"],
+            loc["coords"]["longitude"],
+        )
+
+captured = st.session_state.get("_captured_coords")
+if captured:
+    st.caption(f"📍 Location ready: {captured[0]:.6f}, {captured[1]:.6f}")
+else:
+    st.caption("📍 Waiting for location permission... allow it in the browser prompt above.")
+
 name = st.text_input("Name")
 
 if st.button("💾 Save Location", type="primary", disabled=not (_gsheet_configured() and _GEO_AVAILABLE)):
     if not name.strip():
         st.warning("Please enter your name first.")
+    elif not captured:
+        st.warning(
+            "Still waiting for your location — make sure you allowed the browser's "
+            "location permission prompt (it must also be HTTPS, or localhost, for "
+            "the browser to share location at all), then try Save again in a moment."
+        )
     else:
-        loc = get_geolocation()
-        if not loc or "coords" not in loc:
-            st.warning("Couldn't get your current location yet — please allow the browser's location permission prompt and press Save again.")
-        else:
-            lat = loc["coords"]["latitude"]
-            lon = loc["coords"]["longitude"]
-            save_user_location(name, lat, lon)
-            st.success(f"Saved location for {name.strip()} ({lat:.6f}, {lon:.6f}).")
+        lat, lon = captured
+        save_user_location(name, lat, lon)
+        st.success(f"Saved location for {name.strip()} ({lat:.6f}, {lon:.6f}).")
